@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Mapping
 from typing import Any
 
 from posecap_contracts import PoseBackendManifest
-from posecap_core import LimbFilter, PoseSmoother
+from posecap_core import BODY_JOINT_NAMES, PELVIS, LimbFilter, PoseBinding, PoseSmoother
 
 from .apply_timer import PoseApplyTimer, tag_view3d_redraw
 from .backend_registry import BackendSelectionError
@@ -120,7 +121,9 @@ def start_live_stream(context: Any, bpy_module: Any) -> set[str]:
                 redraw=redraw,
             )
         else:
-            writer = LiveTargetArmaturePoseWriter(settings, redraw=redraw)
+            writer = LiveTargetArmaturePoseWriter(
+                settings, redraw=redraw, ground_joints=_ground_joints(binding)
+            )
         timer = PoseApplyTimer(
             lifecycle_stream,
             writer,
@@ -242,6 +245,16 @@ def _base_command(
 
 def _format_float(value: Any) -> str:
     return f"{float(value):g}"
+
+
+def _ground_joints(binding: PoseBinding | None) -> dict[str, str] | None:
+    """SMPL-X joint to bone names for foot grounding; SMPL-X rigs map to themselves."""
+    if binding is None:
+        return {name: name for name in (PELVIS, *BODY_JOINT_NAMES)}
+    bones = getattr(binding, "bones", None)
+    if not isinstance(bones, Mapping):
+        return None
+    return {name: bone.target_bone_name for name, bone in bones.items()}
 
 
 def _limb_filter_from(settings: LiveStreamSettings) -> LimbFilter | None:

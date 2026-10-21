@@ -11,7 +11,7 @@ import pytest
 from posecap_contracts import decode_pose_frame
 from posecap_core import LandmarkMap
 from posecap_engine.errors import CaptureUnavailableError, EngineError
-from posecap_engine.mediapipe_adapter import MediaPipeFrameSource
+from posecap_engine.mediapipe_adapter import MediaPipeFrameSource, stand_unseen_legs
 from posecap_engine.pear_adapter import CameraSource, VideoFileSource
 
 
@@ -192,6 +192,30 @@ class _FakePreview:
 
     def close(self) -> None:
         self.closed = True
+
+
+def test_unseen_legs_are_replaced_by_straight_standing_legs() -> None:
+    folded = {
+        **_neutral_landmarks(),
+        "left_knee": (0.5, -0.2, 0.6),
+        "left_ankle": (0.1, 0.3, 0.9),
+    }
+    visibility = {name: 1.0 for name in folded}
+    visibility.update({"left_knee": 0.0, "left_ankle": 0.0})
+
+    result = stand_unseen_legs(folded, visibility)
+
+    hip, knee, ankle = result["left_hip"], result["left_knee"], result["left_ankle"]
+    assert knee[0] == hip[0] and knee[2] == hip[2] and knee[1] < hip[1]
+    assert ankle[0] == hip[0] and ankle[2] == hip[2] and ankle[1] < knee[1]
+    assert result["left_foot_index"][2] > ankle[2]
+    assert result["right_knee"] == folded["right_knee"]
+
+
+def test_visible_legs_are_left_untouched() -> None:
+    landmarks = _neutral_landmarks()
+
+    assert stand_unseen_legs(landmarks, {name: 1.0 for name in landmarks}) == landmarks
 
 
 def _neutral_landmarks() -> dict[str, tuple[float, float, float]]:

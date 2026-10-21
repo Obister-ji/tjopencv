@@ -192,6 +192,15 @@ def _capture_setup_properties(bpy_module: Any) -> dict[str, Any]:
 
 def _smoothing_and_disclosure_properties(bpy_module: Any) -> dict[str, Any]:
     return {
+        "keep_feet_on_ground": bpy_module.props.BoolProperty(
+            name="Keep Feet on Ground",
+            description=(
+                "Move the character up or down each frame so its lowest foot stays "
+                "on the floor it stands on at rest: squats sink instead of floating, "
+                "and tilted feet no longer push through the floor"
+            ),
+            default=True,
+        ),
         "pose_smoothing": bpy_module.props.BoolProperty(
             name="Pose Smoothing",
             description=(

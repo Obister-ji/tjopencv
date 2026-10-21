@@ -41,6 +41,7 @@ from posecap_core import (
     mixamo_preset,
     needs_t_pose_re_rest,
     probe_expectations,
+    t_pose_arm_corrections,
     ue_preset,
     validate_mapping,
 )
@@ -111,24 +112,44 @@ def build_pose_binding(arm_obj, preset: SkeletonPreset) -> PoseBinding:
         )
 
     object_orientation = arm_obj.matrix_world.to_quaternion()
+    rest_orientations = {
+        target_name: np.asarray(
+            tuple(object_orientation @ arm_obj.data.bones[target_name].matrix_local.to_quaternion())
+        )
+        for target_name in preset.mapping.values()
+    }
+    corrections = _arm_t_pose_corrections(arm_obj, preset, rest_orientations)
     return PoseBinding(
         {
             source_name: BoundBone(
                 target_bone_name=target_name,
                 compensation_quaternion=compensation_from_rest_orientations(
                     _SMPLX_SOURCE_REST_ORIENTATION,
-                    np.asarray(
-                        tuple(
-                            object_orientation
-                            @ arm_obj.data.bones[target_name].matrix_local.to_quaternion()
-                        )
-                    ),
+                    corrections[target_name].rest_orientation
+                    if target_name in corrections
+                    else rest_orientations[target_name],
                 ),
-                neutral_quaternion=IDENTITY_QUATERNION,
+                neutral_quaternion=(
+                    corrections[target_name].neutral_quaternion
+                    if target_name in corrections
+                    else IDENTITY_QUATERNION
+                ),
             )
             for source_name, target_name in preset.mapping.items()
         }
     )
+
+
+def _arm_t_pose_corrections(arm_obj, preset: SkeletonPreset, rest_orientations):
+    """Swing drooping arms (A-poses) onto the T-pose the SMPL-X source assumes."""
+    chain_bones = {name for chain in preset.arm_chains.values() for pair in chain for name in pair}
+    if not chain_bones <= set(rest_orientations):
+        return {}
+    heads = {
+        name: tuple(arm_obj.matrix_world @ arm_obj.data.bones[name].head_local)
+        for name in chain_bones
+    }
+    return t_pose_arm_corrections(preset.arm_chains, ARM_TARGETS, heads, rest_orientations)
 
 
 def convert_armature(

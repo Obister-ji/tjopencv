@@ -17,6 +17,32 @@ LandmarkMap: TypeAlias = Mapping[str, Sequence[float]]
 _EPSILON = 1e-8
 _IDENTITY = np.eye(3, dtype=np.float64)
 
+# On a flat-footed stance the toe landmark sits below the ankle: measured at
+# 19 degrees (sd 3.7, 30 feet) under the plane perpendicular to the shin.
+# The SMPL-X rest foot is neutral there, so that drop is lifted out before
+# the ankle frame is built; otherwise every standing foot points toes-down.
+NEUTRAL_TOE_DROP_DEGREES = 19.0
+
+# Monocular depth is the weakest channel: a thigh aimed at the camera (squat,
+# raised knee, stride) comes back shorter than it is, with the missing length
+# lost from its depth axis. Leg bone lengths are otherwise stable, so a leg bone
+# shorter than FORESHORTENED_FRACTION of its reference gets its depth restored.
+# References start from these torso ratios and grow to the longest length seen.
+FORESHORTENED_FRACTION = 0.9
+_MIN_TRUSTED_DEPTH = 0.1
+_LEG_TORSO_RATIOS = {"thigh": 0.82, "shin": 0.82}
+_LEG_BONES = {
+    side: (
+        ("thigh", f"{side}_hip", f"{side}_knee"),
+        ("shin", f"{side}_knee", f"{side}_ankle"),
+    )
+    for side in ("left", "right")
+}
+_CARRIED_BY = {
+    "knee": ("knee", "ankle", "heel", "foot_index"),
+    "ankle": ("ankle", "heel", "foot_index"),
+}
+
 _PARENTS = {
     "left_hip": "pelvis",
     "right_hip": "pelvis",
@@ -50,9 +76,13 @@ class LandmarkPoseConverter:
     frame; it is an approximation because joint centres do not observe twist.
     """
 
+    def __init__(self) -> None:
+        self._reference_lengths: dict[str, float] = {}
+
     def convert(self, landmarks: LandmarkMap) -> PosePayload:
         """Convert one landmark map to a pelvis-locked SMPL-X pose payload (axis-angle, radians)."""
         points = {name: _point(landmarks, name) for name in _required_landmarks()}
+        points = self._restore_leg_depth(points)
         global_frames = _global_frames(points)
         body_pose = [
             _matrix_to_axis_angle(global_frames[_PARENTS[name]].T @ global_frames[name]).tolist()
@@ -69,6 +99,44 @@ class LandmarkPoseConverter:
             expression=[0.0] * NUM_EXPRESSION,
             transl=[0.0, 0.0, 0.0],
         )
+
+    def _restore_leg_depth(self, points: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        torso = float(
+            np.linalg.norm(
+                _midpoint(points["left_shoulder"], points["right_shoulder"])
+                - _midpoint(points["left_hip"], points["right_hip"])
+            )
+        )
+        restored = dict(points)
+        for side, bones in _LEG_BONES.items():
+            for kind, parent, child in bones:
+                vector = restored[child] - restored[parent]
+                length = float(np.linalg.norm(vector))
+                key = f"{side}_{kind}"
+                reference = max(
+                    self._reference_lengths.get(key, 0.0), _LEG_TORSO_RATIOS[kind] * torso, length
+                )
+                self._reference_lengths[key] = max(self._reference_lengths.get(key, 0.0), length)
+                fixed = _restore_depth(vector, reference)
+                if fixed is None:
+                    continue
+                shift = fixed - vector
+                for name in _CARRIED_BY[child.split("_", 1)[1]]:
+                    restored[f"{side}_{name}"] = restored[f"{side}_{name}"] + shift
+        return restored
+
+
+def _restore_depth(vector: np.ndarray, reference: float) -> np.ndarray | None:
+    """Lengthen a foreshortened bone along depth (Z), keeping its sideways and vertical reach."""
+    length = float(np.linalg.norm(vector))
+    if length < _EPSILON or length >= FORESHORTENED_FRACTION * reference:
+        return None
+    depth_direction = float(vector[2]) / length
+    if abs(depth_direction) < _MIN_TRUSTED_DEPTH:
+        return None
+    planar_squared = float(vector[0] ** 2 + vector[1] ** 2)
+    depth = float(np.sqrt(max(reference**2 - planar_squared, 0.0)))
+    return np.array([vector[0], vector[1], np.copysign(depth, vector[2])])
 
 
 def _global_frames(points: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -99,7 +167,10 @@ def _global_frames(points: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         foot_index = points[f"{side}_foot_index"]
         hip_frame = _frame_from_xy(pelvis[:, 0], hip - knee)
         knee_frame = _frame_from_xy(hip_frame[:, 0], knee - ankle)
-        ankle_frame = _frame_from_xz(knee_frame[:, 0], foot_index - ankle)
+        toe = _rotate_about(
+            foot_index - ankle, knee_frame[:, 0], -np.radians(NEUTRAL_TOE_DROP_DEGREES)
+        )
+        ankle_frame = _frame_from_xz(knee_frame[:, 0], toe)
         frames[f"{side}_hip"] = hip_frame
         frames[f"{side}_knee"] = knee_frame
         frames[f"{side}_ankle"] = ankle_frame
@@ -171,6 +242,16 @@ def _frame_from_xz(x_hint: np.ndarray, z_hint: np.ndarray) -> np.ndarray:
     y = _unit(np.cross(z, x))
     z = _unit(np.cross(x, y))
     return np.column_stack((x, y, z))
+
+
+def _rotate_about(vector: np.ndarray, axis: np.ndarray, angle: float) -> np.ndarray:
+    """Rodrigues rotation of ``vector`` about the unit ``axis`` (right-handed)."""
+    k = _unit(axis)
+    return (
+        vector * np.cos(angle)
+        + np.cross(k, vector) * np.sin(angle)
+        + k * float(np.dot(k, vector)) * (1.0 - np.cos(angle))
+    )
 
 
 def _unit(vector: np.ndarray) -> np.ndarray:

@@ -19,6 +19,7 @@ from posecap_core import (
     axis_angle_to_quaternion,
     compensation_from_rest_orientations,
     plan_pose_application,
+    t_pose_arm_corrections,
 )
 
 
@@ -181,3 +182,65 @@ def test_binding_defensively_keeps_compensation_values_immutable() -> None:
     assert np.array_equal(bone.compensation_quaternion, [1.0, 0.0, 0.0, 0.0])
     with pytest.raises(ValueError, match="read-only"):
         bone.compensation_quaternion[0] = 0.0
+
+
+def _drooping_arm(angle_degrees: float) -> dict[str, np.ndarray]:
+    theta = np.radians(angle_degrees)
+    direction = np.array([np.cos(theta), 0.0, -np.sin(theta)])
+    shoulder = np.array([0.1, 0.0, 1.5])
+    elbow = shoulder + 0.3 * direction
+    return {"arm": shoulder, "forearm": elbow, "hand": elbow + 0.25 * direction}
+
+
+def test_arm_correction_swings_a_drooping_arm_onto_the_t_pose_axis() -> None:
+    heads = _drooping_arm(15.0)
+    identity = np.asarray([1.0, 0.0, 0.0, 0.0])
+    rests = {name: identity for name in heads}
+
+    corrections = t_pose_arm_corrections(
+        {"l": (("arm", "forearm"), ("forearm", "hand"))},
+        {"l": (1.0, 0.0, 0.0)},
+        heads,
+        rests,
+    )
+
+    assert set(corrections) == {"arm", "forearm", "hand"}
+    swing = corrections["arm"].neutral_quaternion
+    rotated = _rotate(swing, heads["forearm"] - heads["arm"])
+    assert rotated / np.linalg.norm(rotated) == pytest.approx([1.0, 0.0, 0.0], abs=1e-9)
+    assert corrections["hand"].neutral_quaternion == pytest.approx(identity)
+
+
+def test_arm_correction_is_the_identity_for_a_t_pose_arm() -> None:
+    heads = _drooping_arm(0.0)
+    identity = np.asarray([1.0, 0.0, 0.0, 0.0])
+
+    corrections = t_pose_arm_corrections(
+        {"l": (("arm", "forearm"), ("forearm", "hand"))},
+        {"l": (1.0, 0.0, 0.0)},
+        heads,
+        {name: identity for name in heads},
+    )
+
+    assert corrections["arm"].neutral_quaternion == pytest.approx(identity)
+    assert corrections["forearm"].neutral_quaternion == pytest.approx(identity)
+
+
+def test_arm_correction_skips_a_chain_it_cannot_measure() -> None:
+    identity = np.asarray([1.0, 0.0, 0.0, 0.0])
+
+    assert (
+        t_pose_arm_corrections(
+            {"l": (("arm", "forearm"),)},
+            {"l": (1.0, 0.0, 0.0)},
+            {"arm": np.zeros(3), "forearm": np.zeros(3)},
+            {"arm": identity},
+        )
+        == {}
+    )
+
+
+def _rotate(quaternion: np.ndarray, vector: np.ndarray) -> np.ndarray:
+    w, x, y, z = quaternion
+    u = np.array([x, y, z])
+    return vector + 2.0 * np.cross(u, np.cross(u, vector) + w * vector)

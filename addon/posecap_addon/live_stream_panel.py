@@ -48,6 +48,7 @@ def draw_live_stream_panel(
     _draw_source(column, settings)
     column.prop(settings, "apply_orientation_fix")
     column.prop(settings, "world_position_experimental")
+    column.prop(settings, "keep_feet_on_ground")
     column.prop(settings, "pose_smoothing")
 
     # CK2P progressive disclosure: simple by default, fine control on demand

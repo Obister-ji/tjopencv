@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from posecap_core import PoseApplication, PoseBinding, SkeletonPreset, needs_t_pose_re_rest
+from posecap_core import PoseApplication, PoseBinding, SkeletonPreset, needs_chain_aware_binding
 
 from .apply_timer import BpyArmaturePoseWriter
 from .character_setup import convert_armature
@@ -67,17 +67,22 @@ class MatrixRetargetPoseWriter:
 def requires_matrix_retarget(target: Any, binding: PoseBinding) -> bool:
     """Whether this bind pose needs the transient chain-aware evaluator.
 
-    A measured T-pose can use the binding's direct rest compensation.  A
-    non-T bind pose still needs Blender to carry connected-bone translation
-    through the converted temporary source.
+    The binding's direct rest compensation covers a T-pose and, with its arm
+    correction, a moderately drooping A-pose.  A bind pose far from a T still
+    needs Blender to carry connected-bone translation through the converted
+    temporary source.
     """
     preset = _source_preset(binding)
     try:
         world = target.matrix_world
+        # Measure the rest (bind) pose, never the live pose: a stopped stream
+        # leaves the last captured pose on the bones, and raised arms there
+        # would misroute a T-pose character to the intermediary on restart.
+        bones = target.data.bones
         arm_lines = {
             side: (
-                tuple(world @ target.pose.bones[preset.mapping[f"{side}_shoulder"]].head),
-                tuple(world @ target.pose.bones[preset.mapping[f"{side}_elbow"]].head),
+                tuple(world @ bones[preset.mapping[f"{side}_shoulder"]].head_local),
+                tuple(world @ bones[preset.mapping[f"{side}_elbow"]].head_local),
             )
             for side in ("left", "right")
         }
@@ -85,10 +90,7 @@ def requires_matrix_retarget(target: Any, binding: PoseBinding) -> bool:
         # A stale or incomplete target must retain the prior conservative
         # runtime path; normal stream validation will report it to the user.
         return True
-    return needs_t_pose_re_rest(
-        preset,
-        {"l": arm_lines["left"], "r": arm_lines["right"]},
-    )
+    return needs_chain_aware_binding({"l": arm_lines["left"], "r": arm_lines["right"]})
 
 
 def _create_source(bpy_module: Any, target: Any, binding: PoseBinding) -> Any:

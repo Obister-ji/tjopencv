@@ -6,9 +6,17 @@ from .application import (
     PoseApplication,
     plan_pose_application,
 )
-from .binding import BoundBone, PoseBinding, apply_binding, compensation_from_rest_orientations
+from .binding import (
+    BoundBone,
+    PoseBinding,
+    RestCorrection,
+    apply_binding,
+    compensation_from_rest_orientations,
+    t_pose_arm_corrections,
+)
 from .errors import PoseCapError
 from .filters import LimbFilter
+from .ground_contact import FOOT_CHAIN_JOINTS, GroundBone, GroundRig, ground_lift
 from .landmark_pose import LandmarkMap, LandmarkPoseConverter
 from .orientation import flip_global_orient
 from .ports import PoseStream
@@ -23,6 +31,7 @@ from .retarget import (
     detect_skeleton_preset,
     mixamo_mapping,
     mixamo_preset,
+    needs_chain_aware_binding,
     needs_t_pose_re_rest,
     probe_expectations,
     ue_preset,
@@ -47,6 +56,7 @@ from .smoothing import PoseSmoother
 __all__ = [
     "ARM_TARGETS",
     "BODY_JOINT_NAMES",
+    "FOOT_CHAIN_JOINTS",
     "IDENTITY_QUATERNION",
     "KEYFRAME_DATA_PATH",
     "LEFT_HAND_JOINT_NAMES",
@@ -59,6 +69,8 @@ __all__ = [
     "UE_MAPPING",
     "BoneRotation",
     "BoundBone",
+    "GroundBone",
+    "GroundRig",
     "PoseCapError",
     "LimbFilter",
     "LandmarkMap",
@@ -67,6 +79,7 @@ __all__ = [
     "PoseBinding",
     "PoseSmoother",
     "PoseStream",
+    "RestCorrection",
     "SkeletonPreset",
     "arm_t_pose_deviation_degrees",
     "apply_binding",
@@ -77,7 +90,10 @@ __all__ = [
     "make_sign_compatible",
     "mixamo_mapping",
     "mixamo_preset",
+    "needs_chain_aware_binding",
+    "ground_lift",
     "needs_t_pose_re_rest",
+    "t_pose_arm_corrections",
     "plan_pose_application",
     "probe_expectations",
     "quaternion_multiply",

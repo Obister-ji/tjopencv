@@ -5,7 +5,7 @@ live path this module only rewrites an immutable :class:`PoseApplication`, so
 it neither knows about nor mutates Blender data.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -13,6 +13,7 @@ import numpy as np
 
 from .application import BoneRotation, PoseApplication
 from .errors import PoseCapError
+from .rotation import IDENTITY_QUATERNION as _IDENTITY_QUATERNION
 from .rotation import ZERO_ANGLE, FloatArray, quaternion_multiply
 
 
@@ -90,6 +91,74 @@ def compensation_from_rest_orientations(
     return _normalized_readonly(quaternion_multiply(_conjugate(target), source))
 
 
+@dataclass(frozen=True)
+class RestCorrection:
+    """A bone's rest orientation after swinging a drooping arm into a T-pose.
+
+    ``rest_orientation`` is the world orientation the bone has once corrected;
+    ``neutral_quaternion`` is the target-local pose that realises it, so a
+    neutral capture lands the arm on the T-pose instead of its bind droop.
+    """
+
+    rest_orientation: FloatArray
+    neutral_quaternion: FloatArray
+
+
+def t_pose_arm_corrections(
+    arm_chains: Mapping[str, Sequence[tuple[str, str]]],
+    targets: Mapping[str, Sequence[float] | FloatArray],
+    heads: Mapping[str, Sequence[float] | FloatArray],
+    rest_orientations: Mapping[str, FloatArray],
+) -> dict[str, RestCorrection]:
+    """Swing each arm chain onto its T-pose direction, carrying child bones along.
+
+    ``arm_chains`` maps a side key to ordered (bone, child) pairs; ``targets``
+    gives that side's world T-pose direction; ``heads`` and ``rest_orientations``
+    are world-space rest data per bone. Bones in the chain, and the hand that
+    ends it, get a correction; a chain that cannot be measured is left alone.
+    """
+    corrections: dict[str, RestCorrection] = {}
+    for side, chain in arm_chains.items():
+        target = np.asarray(targets[side], dtype=np.float64)
+        parent = np.asarray(_IDENTITY_QUATERNION)
+        pending: dict[str, RestCorrection] = {}
+        for bone, child in chain:
+            if bone not in rest_orientations or bone not in heads or child not in heads:
+                pending = {}
+                break
+            direction = np.asarray(heads[child], dtype=np.float64) - np.asarray(
+                heads[bone], dtype=np.float64
+            )
+            if float(np.linalg.norm(direction)) < ZERO_ANGLE:
+                pending = {}
+                break
+            swing = _rotation_between(_rotate(parent, direction), target)
+            accumulated = quaternion_multiply(swing, parent)
+            rest = np.asarray(rest_orientations[bone], dtype=np.float64)
+            neutral = quaternion_multiply(
+                _conjugate(rest),
+                quaternion_multiply(_conjugate(parent), quaternion_multiply(accumulated, rest)),
+            )
+            pending[bone] = RestCorrection(
+                rest_orientation=_normalized_readonly(quaternion_multiply(accumulated, rest)),
+                neutral_quaternion=_normalized_readonly(neutral),
+            )
+            parent = accumulated
+        if not pending:
+            continue
+        hand = chain[-1][1]
+        if hand in rest_orientations:
+            hand_rest = quaternion_multiply(
+                parent, np.asarray(rest_orientations[hand], dtype=np.float64)
+            )
+            pending[hand] = RestCorrection(
+                rest_orientation=_normalized_readonly(hand_rest),
+                neutral_quaternion=_IDENTITY_QUATERNION,
+            )
+        corrections.update(pending)
+    return corrections
+
+
 def apply_binding(plan: PoseApplication, binding: PoseBinding) -> PoseApplication:
     """Rewrite a SMPL-X pose plan to the target rig's original bone names.
 
@@ -155,6 +224,27 @@ def _source_quaternion(target_quaternion: FloatArray, bone: BoundBone) -> FloatA
         _conjugate(bone.compensation_quaternion),
         quaternion_multiply(without_neutral, bone.compensation_quaternion),
     )
+
+
+def _rotation_between(source: FloatArray, target: FloatArray) -> FloatArray:
+    a = source / np.linalg.norm(source)
+    b = target / np.linalg.norm(target)
+    cosine = float(np.dot(a, b))
+    if cosine < -1.0 + 1e-9:
+        axis = np.cross(a, np.array([1.0, 0.0, 0.0]))
+        if float(np.linalg.norm(axis)) < 1e-6:
+            axis = np.cross(a, np.array([0.0, 1.0, 0.0]))
+        axis = axis / np.linalg.norm(axis)
+        return np.array([0.0, *axis])
+    quaternion = np.array([1.0 + cosine, *np.cross(a, b)])
+    return quaternion / np.linalg.norm(quaternion)
+
+
+def _rotate(quaternion: FloatArray, vector: FloatArray) -> FloatArray:
+    rotated = quaternion_multiply(
+        quaternion_multiply(quaternion, np.array([0.0, *vector])), _conjugate(quaternion)
+    )
+    return rotated[1:]
 
 
 def _conjugate(quaternion: FloatArray) -> FloatArray:

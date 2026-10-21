@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from typing import Any
 
@@ -63,9 +63,11 @@ class LiveTargetArmaturePoseWriter:
         settings: LiveStreamSettings,
         *,
         redraw: Callable[[], None] | None = None,
+        ground_joints: Mapping[str, str] | None = None,
     ) -> None:
         self._settings = settings
         self._redraw = redraw
+        self._ground_joints = ground_joints
 
     def is_valid(self) -> bool:
         return self._writer().is_valid()
@@ -78,7 +80,12 @@ class LiveTargetArmaturePoseWriter:
             self._redraw()
 
     def _writer(self) -> BpyArmaturePoseWriter:
-        return BpyArmaturePoseWriter(self._settings.target_armature)
+        # Read live so Keep Feet on Ground can be toggled mid-stream.
+        grounded = bool(getattr(self._settings, "keep_feet_on_ground", True))
+        return BpyArmaturePoseWriter(
+            self._settings.target_armature,
+            ground_joints=self._ground_joints if grounded else None,
+        )
 
 
 class LifecyclePoseStream:

@@ -2,22 +2,26 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 import numpy as np
 from posecap_contracts import PoseFrame
 from posecap_core import (
     BODY_JOINT_NAMES,
+    FOOT_CHAIN_JOINTS,
     KEYFRAME_DATA_PATH,
     LEFT_HAND_JOINT_NAMES,
     PELVIS,
     RIGHT_HAND_JOINT_NAMES,
+    GroundBone,
+    GroundRig,
     LimbFilter,
     PoseApplication,
     PoseBinding,
     PoseSmoother,
     PoseStream,
+    ground_lift,
     plan_pose_application,
 )
 
@@ -149,11 +153,23 @@ class PoseApplyTimer:
 
 
 class BpyArmaturePoseWriter:
-    """Duck-typed Blender armature writer for a planned pose application."""
+    """Duck-typed Blender armature writer for a planned pose application.
 
-    def __init__(self, armature: Any, *, redraw: Callable[[], None] | None = None) -> None:
+    ``ground_joints`` maps SMPL-X joint names to the armature's bone names;
+    when given, the pelvis is moved along the world up axis after every pose so
+    the feet stay on the floor the character stands on at rest.
+    """
+
+    def __init__(
+        self,
+        armature: Any,
+        *,
+        redraw: Callable[[], None] | None = None,
+        ground_joints: Mapping[str, str] | None = None,
+    ) -> None:
         self._armature = armature
         self._redraw = redraw
+        self._ground_joints = ground_joints
 
     def is_valid(self) -> bool:
         return self._pose_bones() is not None
@@ -167,6 +183,10 @@ class BpyArmaturePoseWriter:
             bone = _bone_by_name(bones, rotation.bone_name)
             if bone is not None:
                 _write_quaternion(bone, rotation.quaternion, insert_keyframes=insert_keyframes)
+        if self._ground_joints is not None:
+            _keep_feet_on_ground(
+                self._armature, bones, self._ground_joints, insert_keyframes=insert_keyframes
+            )
         if plan.world_offset is not None:
             self._armature.location = tuple(float(value) for value in plan.world_offset)
 
@@ -214,6 +234,75 @@ class BpyArmaturePoseWriter:
 
 
 _IDENTITY_QUATERNION = np.asarray([1.0, 0.0, 0.0, 0.0])
+_WORLD_UP = np.asarray([0.0, 0.0, 1.0])
+
+
+def _keep_feet_on_ground(
+    armature: Any, bones: Any, ground_joints: Mapping[str, str], *, insert_keyframes: bool
+) -> None:
+    """Move the pelvis so the lowest sole point sits on its rest floor."""
+    try:
+        rig = build_ground_rig(armature, ground_joints)
+    except (AttributeError, KeyError, ReferenceError, TypeError, ValueError):
+        # Grounding is a refinement: a rig it cannot read still streams.
+        return
+    pelvis_name = ground_joints.get(PELVIS)
+    pelvis = _bone_by_name(bones, pelvis_name) if pelvis_name else None
+    if rig is None or pelvis is None or getattr(pelvis.bone, "use_connect", False):
+        return
+    rotations = {}
+    for ground_bone in rig.bones:
+        pose_bone = _bone_by_name(bones, ground_bone.name)
+        if pose_bone is None:
+            return
+        rotations[ground_bone.name] = tuple(pose_bone.rotation_quaternion)
+    lift = ground_lift(rig, rotations)
+    pelvis_rest = next(bone.rest_matrix for bone in rig.bones if bone.name == pelvis_name)
+    # A root bone's pose location is expressed in its own rest axes (scaled by
+    # the object), so pull the world-up offset back through that frame.
+    location = np.linalg.solve(pelvis_rest[:3, :3], _WORLD_UP * lift)
+    pelvis.location = tuple(float(value) for value in location)
+    if insert_keyframes:
+        pelvis.keyframe_insert(data_path="location")
+
+
+def build_ground_rig(armature: Any, ground_joints: Mapping[str, str]) -> GroundRig | None:
+    """Read the leg chains and rest sole points; ``None`` when the rig lacks them."""
+    data_bones = armature.data.bones
+    world = np.asarray(armature.matrix_world, dtype=np.float64)
+
+    def rest_matrix(name: str) -> np.ndarray:
+        return world @ np.asarray(data_bones[name].matrix_local, dtype=np.float64)
+
+    def world_point(local: Any) -> np.ndarray:
+        return (world @ np.append(np.asarray(tuple(local), dtype=np.float64), 1.0))[:3]
+
+    pelvis = ground_joints.get(PELVIS)
+    if not pelvis or pelvis not in data_bones:
+        return None
+    bones = [GroundBone(pelvis, None, rest_matrix(pelvis))]
+    contacts: list[tuple[str, np.ndarray]] = []
+    for joints in FOOT_CHAIN_JOINTS.values():
+        hip, knee, ankle, foot = (ground_joints.get(joint) for joint in joints)
+        if not (hip and knee and ankle) or any(n not in data_bones for n in (hip, knee, ankle)):
+            return None
+        parent = pelvis
+        for name in (hip, knee, ankle):
+            bones.append(GroundBone(name, parent, rest_matrix(name)))
+            parent = name
+        ankle_head = world_point(data_bones[ankle].head_local)
+        if foot and foot in data_bones:
+            bones.append(GroundBone(foot, ankle, rest_matrix(foot)))
+            ball = world_point(data_bones[foot].head_local)
+            contacts.append((foot, ball))
+            contacts.append((foot, world_point(data_bones[foot].tail_local)))
+        else:
+            ball = world_point(data_bones[ankle].tail_local)
+            contacts.append((ankle, ball))
+        # The heel sits under the ankle, level with the ball of the foot.
+        heel = ankle_head - _WORLD_UP * float(_WORLD_UP @ (ankle_head - ball))
+        contacts.append((ankle, heel))
+    return GroundRig(bones=tuple(bones), contacts=tuple(contacts), up=_WORLD_UP)
 
 
 def _bones_for_capabilities(capabilities: tuple[str, ...] | None) -> frozenset[str] | None:

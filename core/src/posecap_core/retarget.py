@@ -138,6 +138,11 @@ PROBE_RELATIVE_TOLERANCE = 0.05
 # (degrees(0.05)), so the trigger fires with margin below that.
 T_POSE_MAX_ARM_DEVIATION_DEGREES = 2.0
 
+# Direct binding corrects a drooping arm to the T-pose analytically (A-poses
+# included); only a bind pose further off than this needs the chain-aware
+# intermediary to carry connected-bone translation.
+DIRECT_BIND_MAX_ARM_DEVIATION_DEGREES = 30.0
+
 ArmLines = dict[str, tuple[tuple[float, float, float], tuple[float, float, float]]]
 
 
@@ -153,6 +158,14 @@ def needs_t_pose_re_rest(preset: SkeletonPreset, arm_lines: ArmLines) -> bool:
         return True
     return any(
         arm_t_pose_deviation_degrees(shoulder, elbow, side) > T_POSE_MAX_ARM_DEVIATION_DEGREES
+        for side, (shoulder, elbow) in arm_lines.items()
+    )
+
+
+def needs_chain_aware_binding(arm_lines: ArmLines) -> bool:
+    """Whether a bind pose is too far from a T-pose for direct rest compensation."""
+    return any(
+        arm_t_pose_deviation_degrees(shoulder, elbow, side) > DIRECT_BIND_MAX_ARM_DEVIATION_DEGREES
         for side, (shoulder, elbow) in arm_lines.items()
     )
 

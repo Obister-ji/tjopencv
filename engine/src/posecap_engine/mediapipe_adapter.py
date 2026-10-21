@@ -153,6 +153,49 @@ _LANDMARK_INDICES = {
 }
 
 
+# MediaPipe still emits knee/ankle world landmarks when the legs are out of frame
+# (a laptop webcam sees the upper body only). They are guesses, not measurements,
+# and driving a character from them folds the legs and sinks the whole body.
+_MIN_LEG_VISIBILITY = 0.5
+_REFERENCE_TORSO_LENGTH = 0.5
+_STANDING_SEGMENT_PER_TORSO = 0.85
+_STANDING_HEEL_OFFSET = (0.0, -0.04, -0.06)
+_STANDING_TOE_OFFSET = (0.0, -0.06, 0.15)
+
+
+def stand_unseen_legs(
+    landmarks: dict[str, tuple[float, float, float]],
+    visibility: dict[str, float],
+    *,
+    min_visibility: float = _MIN_LEG_VISIBILITY,
+) -> dict[str, tuple[float, float, float]]:
+    """Replace each leg whose knee or ankle is not visible with a straight standing leg."""
+    hip_center = (np.asarray(landmarks["left_hip"]) + np.asarray(landmarks["right_hip"])) / 2.0
+    shoulder_center = (
+        np.asarray(landmarks["left_shoulder"]) + np.asarray(landmarks["right_shoulder"])
+    ) / 2.0
+    torso = float(np.linalg.norm(shoulder_center - hip_center))
+    scale = torso / _REFERENCE_TORSO_LENGTH if torso > 1e-6 else 1.0
+    segment = _STANDING_SEGMENT_PER_TORSO * torso if torso > 1e-6 else 0.42
+    result = dict(landmarks)
+    for side in ("left", "right"):
+        seen = min(visibility[f"{side}_knee"], visibility[f"{side}_ankle"])
+        if seen >= min_visibility:
+            continue
+        hip = np.asarray(landmarks[f"{side}_hip"], dtype=np.float64)
+        knee = hip + (0.0, -segment, 0.0)
+        ankle = knee + (0.0, -segment, 0.0)
+        result[f"{side}_knee"] = _as_point(knee)
+        result[f"{side}_ankle"] = _as_point(ankle)
+        result[f"{side}_heel"] = _as_point(ankle + np.asarray(_STANDING_HEEL_OFFSET) * scale)
+        result[f"{side}_foot_index"] = _as_point(ankle + np.asarray(_STANDING_TOE_OFFSET) * scale)
+    return result
+
+
+def _as_point(vector: np.ndarray) -> tuple[float, float, float]:
+    return (float(vector[0]), float(vector[1]), float(vector[2]))
+
+
 class _MediaPipeTaskRuntime:
     def __init__(self, config: MediaPipeLiveConfig, mediapipe: Any) -> None:
         if not config.model_path.is_file():
@@ -179,7 +222,7 @@ class _MediaPipeTaskRuntime:
         landmarks = result.pose_world_landmarks
         if len(landmarks) < 33:
             return None
-        return {
+        points = {
             name: (
                 float(landmarks[index].x),
                 -float(landmarks[index].y),
@@ -187,6 +230,11 @@ class _MediaPipeTaskRuntime:
             )
             for name, index in _LANDMARK_INDICES.items()
         }
+        visibility = {
+            name: float(getattr(landmarks[index], "visibility", 1.0))
+            for name, index in _LANDMARK_INDICES.items()
+        }
+        return stand_unseen_legs(points, visibility)
 
     def close(self) -> None:
         self._landmarker.close()

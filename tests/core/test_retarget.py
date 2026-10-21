@@ -18,6 +18,7 @@ from posecap_core.retarget import (
     detect_skeleton_preset,
     mixamo_mapping,
     mixamo_preset,
+    needs_chain_aware_binding,
     needs_t_pose_re_rest,
     probe_expectations,
     ue_preset,
@@ -206,3 +207,8 @@ def test_core_quaternion_has_parity_with_the_removed_addon_helper() -> None:
     assert x == pytest.approx(0.0)
     assert y == pytest.approx(0.0)
     assert np.allclose(axis_angle_to_quaternion(np.zeros(3)), [1.0, 0.0, 0.0, 0.0])
+
+
+def test_a_moderate_a_pose_binds_directly_but_a_steep_droop_needs_the_chain_evaluator() -> None:
+    assert not needs_chain_aware_binding(_arm_lines(15.0))
+    assert needs_chain_aware_binding(_arm_lines(70.0))
